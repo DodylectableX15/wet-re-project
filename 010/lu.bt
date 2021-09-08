@@ -1,0 +1,140 @@
+//------------------------------------------------
+//--- 010 Editor v11.0.1 Binary Template
+//
+//      File: 
+//   Authors: 
+//   Version: 
+//   Purpose: 
+//  Category: 
+// File Mask: *.lu
+//  ID Bytes: 
+//   History: 
+//------------------------------------------------
+
+BigEndian();
+
+typedef enum
+{
+    UNCOMPRESSED,
+    BLOCKED = 2,
+} BLOCK_MODE;
+
+// 24 bytes
+typedef struct
+{
+    uint key<format=hex>;
+    uint size_1;
+    uint always_ff<format=hex>;
+    uint uncompressed_size;
+    uint uncompressed_offset;
+    uint unknown;
+} FileEntry;
+
+typedef struct (uint start_offset, FileEntry& fe)
+{
+    // Each file has own header data and padding
+    FSeek(start_offset + fe.uncompressed_offset);
+    byte data[fe.uncompressed_size];
+} File;
+
+typedef struct (uint size)
+{
+    byte data[size];
+} DataBlock;
+
+typedef struct (uint start)
+{
+    uint pos;
+    local uint abs_pos = start + pos;
+} Offset<read=read_offset>;
+
+string read_offset(Offset& offset)
+{
+    if (offset.pos == 0xFFFFFFFF)
+    {
+        return "---";
+    }
+
+    local string s;
+    SPrintf(s, "%d", offset.abs_pos);
+    return s;
+}
+
+// Note: Data can be padded with "BF BF BF"... bytes
+typedef struct
+{
+    struct PlatformHeader
+    {
+        char magic[4]; // 0x30 + x36
+        FSkip(28);
+    } header_1;
+
+    struct CrapHeader
+    {
+        local uint start = FTell();
+
+        uint64 always_ff<format=hex>;
+        uint always_0;
+        uint always_ff<format=hex>;
+        uint always_0;
+
+        Offset block_mode_offset(start);
+        Offset some_offset(start); // file_entries_offset_offset?
+        uint always_0;
+
+        Offset blocks_offset(start);
+        BLOCK_MODE block_mode; // 0, 2
+        uint uncompressed_size;
+
+        uint unk_0; // Will match uncompressed_size if data uncompressed
+        uint unk_1;
+        Offset block_sizes_offset(start);
+
+        uint block_count;
+        if (block_count > 0)
+        {
+            FSeek(block_sizes_offset.abs_pos);
+            uint block_sizes[block_count];
+        }
+
+        Offset file_entries_offset(start); // 72, 80
+        uint file_entries_count;
+    } header_2;
+
+    // Read file entries
+    if (header_2.file_entries_count > 0)
+    {
+        FSeek(header_2.file_entries_offset.abs_pos);
+        FileEntry file_entries[header_2.file_entries_count];
+    }
+    
+    // Read blocks
+    if (header_2.block_count > 0)
+    {
+        struct Blocks
+        {
+            local int i;
+            for (i = 0; i < header_2.block_count; i++)
+            {
+                DataBlock blocks(header_2.block_sizes[i]);
+            }
+        } blocks;
+    }
+
+    // Read files
+    if (header_2.block_mode == UNCOMPRESSED && header_2.file_entries_count > 0)
+    {
+        struct Files
+        {
+            local uint files_offset = FTell();
+
+            local int i;
+            for (i = 0; i < header_2.file_entries_count; i++)
+            {
+                File files(files_offset, file_entries[i]);
+            }
+        } files;
+    }
+} LuFile;
+
+LuFile file;
