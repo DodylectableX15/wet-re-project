@@ -1,10 +1,10 @@
 //------------------------------------------------
 //--- 010 Editor v11.0.1 Binary Template
 //
-//      File: lu_x360.bt
+//      File: lu.bt
 //   Authors: PikminGuts92
-//   Version: 1.0
-//   Purpose: Reversing LU files of WET (X360 version)
+//   Version: 1.1
+//   Purpose: Reversing LU files of WET
 //  Category: 
 // File Mask: *.lu
 //  ID Bytes: 
@@ -12,6 +12,21 @@
 //------------------------------------------------
 
 BigEndian();
+
+struct Blocks;
+struct Files;
+
+string read_blocks(Blocks& blocks)
+{
+    local string s;
+    return SPrintf(s, "(%d blocks)", blocks.count);
+}
+
+string read_files(Files& files)
+{
+    local string s;
+    return SPrintf(s, "(%d files)", files.count);
+}
 
 typedef enum
 {
@@ -46,6 +61,7 @@ typedef struct (uint start)
 {
     uint pos;
     local uint abs_pos = start + pos;
+    local byte is_null = pos == 0xFFFFFFFF ? 1 : 0;
 } Offset<read=read_offset>;
 
 string read_offset(Offset& offset)
@@ -65,75 +81,114 @@ typedef struct
 {
     struct PlatformHeader
     {
-        char magic[4]; // 0x30 + x36
+        char magic[4]; // (0x30 + 'x36') or (0x01 + 'ps3')
         FSkip(28);
-    } header_1;
+    } platform_header;
+
+    // True start which offsets reference
+    local uint start = FTell();
 
     struct CrapHeader
     {
-        local uint start = FTell();
-
         uint64 always_ff<format=hex>;
         uint always_0;
-        uint always_ff<format=hex>;
+
+        Offset external_file_name_offset(start);
+        uint external_file_name_size; // Including null terminator byte
+
+        Offset block_data_offset(start);
+        Offset file_data_offset(start);
         uint always_0;
 
-        Offset block_mode_offset(start);
-        Offset some_offset(start); // file_entries_offset_offset?
-        uint always_0;
+        Offset data_start_offset(start); // Use for either block/file start
+    } crap_data;
 
-        Offset blocks_offset(start);
-        BLOCK_MODE block_mode; // 0, 2
-        uint uncompressed_size;
+    // Read external file name
+    if (!crap_data.external_file_name_offset.is_null)
+    {
+        FSeek(crap_data.external_file_name_offset.abs_pos);
+        if (crap_data.external_file_name_size > 0) char external_file_name[crap_data.external_file_name_size];
+    }
 
-        uint unk_0; // Will match uncompressed_size if data uncompressed
-        uint unk_1;
-        Offset block_sizes_offset(start);
-
-        uint block_count;
-        if (block_count > 0)
+    // Read block data
+    if (!crap_data.block_data_offset.is_null)
+    {
+        FSeek(crap_data.block_data_offset.abs_pos);
+        struct BlockData
         {
-            FSeek(block_sizes_offset.abs_pos);
-            uint block_sizes[block_count];
+            BLOCK_MODE block_mode; // 0, 2
+            uint uncompressed_size;
+
+            uint unk_0; // Will match uncompressed_size if data uncompressed
+            uint unk_1; // 1, 5
+            Offset block_sizes_offset(start);
+
+            uint block_count;
+            if (block_count > 0)
+            {
+                // Read block entries
+                FSeek(block_sizes_offset.abs_pos);
+                uint block_sizes[block_count];
+            }
+        } block_data;
+    }
+
+    // Read file data
+    if (!crap_data.file_data_offset.is_null)
+    {
+        FSeek(crap_data.file_data_offset.abs_pos);
+        struct FileData
+        {
+            Offset file_entries_offset(start);
+            uint file_entries_count;
+
+            if (file_entries_count > 0)
+            {
+                // Read file entries
+                FSeek(file_entries_offset.abs_pos);
+                FileEntry file_entries[file_entries_count];
+            }
+        } file_data;
+    }
+
+    // Read data
+    if (!crap_data.data_start_offset.is_null && exists(block_data))
+    {
+        FSeek(crap_data.data_start_offset.abs_pos);
+
+        if (block_data.block_mode == UNCOMPRESSED && exists(file_data) && exists(file_data.file_entries))
+        {
+            // Read files
+            struct Files
+            {
+                local uint files_offset = FTell();
+                local uint count = file_data.file_entries_count;
+
+                local int i;
+                for (i = 0; i < file_data.file_entries_count; i++)
+                {
+                    File files(files_offset, file_data.file_entries[i]);
+                }
+            } files<read=read_files>;
         }
-
-        Offset file_entries_offset(start); // 72, 80
-        uint file_entries_count;
-    } header_2;
-
-    // Read file entries
-    if (header_2.file_entries_count > 0)
-    {
-        FSeek(header_2.file_entries_offset.abs_pos);
-        FileEntry file_entries[header_2.file_entries_count];
-    }
-    
-    // Read blocks
-    if (header_2.block_count > 0)
-    {
-        struct Blocks
+        else if (block_data.block_mode == BLOCKED && exists(block_data.block_sizes))
         {
-            local int i;
-            for (i = 0; i < header_2.block_count; i++)
+            // Read blocks
+            struct Blocks
             {
-                DataBlock blocks(header_2.block_sizes[i]);
-            }
-        } blocks;
-    }
+                local uint count = block_data.block_count;
 
-    // Read files
-    if (header_2.block_mode == UNCOMPRESSED && header_2.file_entries_count > 0)
-    {
-        struct Files
+                local int i;
+                for (i = 0; i < block_data.block_count; i++)
+                {
+                    DataBlock blocks(block_data.block_sizes[i]);
+                }
+            } blocks<read=read_blocks>;
+        }
+        else
         {
-            local uint files_offset = FTell();
-
-            local int i;
-            for (i = 0; i < header_2.file_entries_count; i++)
-            {
-                File files(files_offset, file_entries[i]);
-            }
-        } files;
+            Printf("WARN: Unsupported block mode of %d\n", block_data.block_mode);
+        }
     }
 } LuFile;
 
