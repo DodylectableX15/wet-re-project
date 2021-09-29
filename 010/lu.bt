@@ -15,6 +15,7 @@ BigEndian();
 
 struct Blocks;
 struct Files;
+struct File;
 
 string read_blocks(Blocks& blocks)
 {
@@ -28,6 +29,12 @@ string read_files(Files& files)
     return SPrintf(s, "(%d files)", files.count);
 }
 
+string read_file(File& file)
+{
+    local string s;
+    return SPrintf(s, "(0x%08X, 0x%08X)", file.key_1, file.key_2);
+}
+
 typedef enum
 {
     UNCOMPRESSED,
@@ -37,20 +44,23 @@ typedef enum
 // 24 bytes
 typedef struct
 {
-    uint key<format=hex>;
-    uint size_1;
+    uint key_1<format=hex>; // Id or name?
+    uint key_2<format=hex>; // File type?
+
     uint always_ff<format=hex>;
     uint uncompressed_size;
     uint uncompressed_offset;
-    uint unknown;
+    uint unknown<format=hex>;
 } FileEntry;
 
-typedef struct (uint start_offset, FileEntry& fe)
+typedef struct (FileEntry& fe)
 {
+    local uint key_1 = fe.key_1;
+    local uint key_2 = fe.key_2;
+
     // Each file has own header data and padding
-    FSeek(start_offset + fe.uncompressed_offset);
     byte data[fe.uncompressed_size];
-} File;
+} File<read=read_file>;
 
 typedef struct (uint size)
 {
@@ -167,7 +177,8 @@ typedef struct
                 local int i;
                 for (i = 0; i < file_data.file_entries_count; i++)
                 {
-                    File files(files_offset, file_data.file_entries[i]);
+                    FSeek(files_offset + file_data.file_entries[i].uncompressed_offset);
+                    File files(file_data.file_entries[i]);
                 }
             } files<read=read_files>;
         }
